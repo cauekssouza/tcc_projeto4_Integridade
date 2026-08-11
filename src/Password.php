@@ -4,116 +4,106 @@ namespace Delight\Auth;
 
 final class PasswordHash {
 
-    /** @var int|string Algoritmo usado pelo password_hash */
-    private const HASH_ALGORITHM = \PASSWORD_DEFAULT;
-
-    /** @var string Pepper usado no HMAC-SHA512 */
+    private const HASH_ALGO = \PASSWORD_DEFAULT;
     private const PEPPER = 'bec95beffb3afd078df7cbfd4c4617ba214ac4641a157c1ca64106e7544c9fb4cef6e99b0a8f0b63e96328c09943ce96b9b8899ff54fa7ea57b622675442dbbf';
-
-    /** @var string Prefixo indicando prehash + bcrypt */
-    private const PREFIX_BCRYPT_PREHASH = '$pa01';
-
-    /** @var int Tamanho do prefixo */
-    private const PREFIX_LENGTH = 5;
+    private const PREFIX = '$pa01';
+    private const PREFIX_LEN = 5;
 
     /**
-     * Gera um hash seguro para o texto da senha.
+     * Gera um hash seguro para a senha.
      *
-     * @param string $passwordText
-     * @return string|bool
-     */
-    public static function from(string $passwordText) {
-        $useBcrypt = self::usesBcrypt();
-
-        if ($useBcrypt) {
-            $passwordText = self::prehash($passwordText);
-            $prefix = self::PREFIX_BCRYPT_PREHASH;
-        }
-        else {
-            $prefix = '';
-        }
-
-        return $prefix . \password_hash($passwordText, self::HASH_ALGORITHM);
-    }
-
-    /**
-     * Verifica se o texto da senha corresponde ao hash armazenado.
-     *
-     * @param string $passwordText
-     * @param string $expectedHash
-     * @return bool
-     */
-    public static function verify(string $passwordText, string $expectedHash): bool {
-        $hasPrefix = self::hasPrehashPrefix($expectedHash);
-
-        if ($hasPrefix) {
-            $passwordText = self::prehash($passwordText);
-            $expectedHash = self::removePrefix($expectedHash);
-        }
-
-        return \password_verify($passwordText, $expectedHash);
-    }
-
-    /**
-     * Verifica se o hash existente precisa ser refeito.
-     *
-     * @param string $existingHash
-     * @return bool
-     */
-    public static function needsRehash(string $existingHash): bool {
-        if (self::hasPrehashPrefix($existingHash)) {
-            $existingHash = self::removePrefix($existingHash);
-        }
-
-        return \password_needs_rehash($existingHash, self::HASH_ALGORITHM);
-    }
-
-    /**
-     * Aplica prehash com HMAC-SHA512 + Base64.
-     *
-     * @param string $passwordText
+     * @param string $password
      * @return string
      * @throws AuthError
      */
-    private static function prehash(string $passwordText): string {
-        $pepperBinary = \hex2bin(self::PEPPER);
+    public static function from(string $password): string {
+        $usePrehash = self::shouldUsePrehash();
 
-        $hmacBinary = \hash_hmac('sha512', $passwordText, $pepperBinary, true);
-
-        if (!$hmacBinary) {
-            throw new AuthError('Could not generate HMAC');
+        if ($usePrehash) {
+            $password = self::prehash($password);
         }
 
-        return \base64_encode($hmacBinary);
+        $hash = \password_hash($password, self::HASH_ALGO);
+
+        if ($hash === false) {
+            throw new AuthError('Falha ao gerar hash da senha');
+        }
+
+        return ($usePrehash ? self::PREFIX : '') . $hash;
     }
 
     /**
-     * Verifica se o algoritmo atual é bcrypt.
+     * Verifica se a senha corresponde ao hash armazenado.
      *
+     * @param string $password
+     * @param string $expectedHash
      * @return bool
+     * @throws AuthError
      */
-    private static function usesBcrypt(): bool {
-        return self::HASH_ALGORITHM === \PASSWORD_BCRYPT
-            || self::HASH_ALGORITHM === null;
+    public static function verify(string $password, string $expectedHash): bool {
+        if (self::hasPrefix($expectedHash)) {
+            $password = self::prehash($password);
+            $expectedHash = self::stripPrefix($expectedHash);
+        }
+
+        return \password_verify($password, $expectedHash);
     }
 
     /**
-     * Verifica se o hash possui o prefixo de prehash.
+     * Verifica se o hash precisa ser atualizado.
      *
      * @param string $hash
      * @return bool
      */
-    private static function hasPrehashPrefix(string $hash): bool {
-        return \strncmp($hash, self::PREFIX_BCRYPT_PREHASH, self::PREFIX_LENGTH) === 0;
+    public static function needsRehash(string $hash): bool {
+        if (self::hasPrefix($hash)) {
+            $hash = self::stripPrefix($hash);
+        }
+
+        return \password_needs_rehash($hash, self::HASH_ALGO);
     }
 
     /**
-     * Remove o prefixo do hash.
+     * Aplica pré-hashing com HMAC-SHA512 + Base64.
      *
-     * @param string $hash
+     * @param string $password
      * @return string
+     * @throws AuthError
      */
-    private static function removePrefix(string $hash): string {
-        return \substr($hash, self::PREFIX_LENGTH);
+    private static function prehash(string $password): string {
+        $pepper = \hex2bin(self::PEPPER);
+
+        if ($pepper === false) {
+            throw new AuthError('Pepper inválido para HMAC');
+        }
+
+        $hmac = \hash_hmac('sha512', $password, $pepper, true);
+
+        if (empty($hmac)) {
+            throw new AuthError('Falha ao gerar HMAC para pré-hash');
+        }
+
+        return \base64_encode($hmac);
+    }
+
+    /**
+     * Determina se o pré-hash deve ser aplicado.
+     */
+    private static function shouldUsePrehash(): bool {
+        return self::HASH_ALGO === \PASSWORD_BCRYPT || self::HASH_ALGO === null;
+    }
+
+    /**
+     * Verifica se o hash possui o prefixo customizado.
+     */
+    private static function hasPrefix(string $hash): bool {
+        return \strncmp($hash, self::PREFIX, self::PREFIX_LEN) === 0;
+    }
+
+    /**
+     * Remove o prefixo customizado do hash.
+     */
+    private static function stripPrefix(string $hash): string {
+        return \substr($hash, self::PREFIX_LEN);
     }
 }
