@@ -19,188 +19,237 @@ final class PasswordHash {
 	const PREFIX_LENGTH = 5;
 
 	/**
-	 * Creates a computationally expensive hash from a password.
+	 * Creates a computationally expensive hash from a password
 	 *
 	 * @param string $passwordText
 	 * @return string|bool
 	 */
 	public static function from($passwordText) {
-		$outputPrefix = '';
+		try {
+			// When bcrypt is used, pre-hash the complete password first.
+			// This prevents bcrypt's 72-byte input limit and null-byte
+			// restrictions from changing the effective password.
+			if (
+				self::HASH_ALGORITHM_IDENTIFIER === \PASSWORD_BCRYPT
+				|| self::HASH_ALGORITHM_IDENTIFIER === null
+			) {
+				$passwordText = self::prehash($passwordText);
+				$outputPrefix = self::PREFIX_BCRYPT_WITH_HMAC_SHA_512_PREHASH;
+			}
+			else {
+				$outputPrefix = '';
+			}
 
-		/*
-		 * Apply the HMAC-SHA-512 pre-hash whenever bcrypt is the
-		 * effective password hashing algorithm.
-		 *
-		 * This ensures that:
-		 * - the complete original password is authenticated by HMAC;
-		 * - embedded NUL bytes remain part of the input;
-		 * - passwords longer than bcrypt's 72-byte input limit are not
-		 *   truncated before the pre-hash;
-		 * - bcrypt receives a printable Base64 representation.
-		 */
-		if (
-			self::HASH_ALGORITHM_IDENTIFIER === \PASSWORD_BCRYPT
-			|| self::HASH_ALGORITHM_IDENTIFIER === null
-		) {
-			$passwordText = self::prehash($passwordText);
-			$outputPrefix = self::PREFIX_BCRYPT_WITH_HMAC_SHA_512_PREHASH;
+			$hash = \password_hash(
+				$passwordText,
+				self::HASH_ALGORITHM_IDENTIFIER
+			);
+
+			// Preserve the documented string|bool return contract.
+			if ($hash === false) {
+				return false;
+			}
+
+			return $outputPrefix . $hash;
 		}
-
-		$hash = \password_hash(
-			$passwordText,
-			self::HASH_ALGORITHM_IDENTIFIER
-		);
-
-		/*
-		 * Fail closed.
-		 *
-		 * Do not concatenate the custom prefix with a failed hashing
-		 * operation, which could otherwise create a malformed value that
-		 * resembles a valid application hash.
-		 *
-		 * This branch also maintains compatibility with PHP versions
-		 * where password_hash() may report failure as false.
-		 */
-		if ($hash === false) {
-			return false;
+		catch (AuthError $e) {
+			// prehash() already converted the failure into a sanitized error.
+			throw $e;
 		}
-
-		return $outputPrefix . $hash;
+		catch (\Throwable $e) {
+			// Never propagate implementation, algorithm or infrastructure
+			// details originating from PHP internals.
+			throw new AuthError('Password processing failed');
+		}
 	}
 
 	/**
-	 * Verifies whether a password matches a computationally expensive hash.
+	 * Verifies whether a password matches a computationally expensive hash
 	 *
 	 * @param string $passwordText
 	 * @param string $expectedHash
 	 * @return bool
 	 */
 	public static function verify($passwordText, $expectedHash) {
-		/*
-		 * The prefix is metadata, not a secret authentication value.
-		 * Its comparison therefore does not replace or weaken the
-		 * constant-time password verification performed below.
-		 */
-		if (
-			\substr($expectedHash, 0, self::PREFIX_LENGTH)
-			=== self::PREFIX_BCRYPT_WITH_HMAC_SHA_512_PREHASH
-		) {
-			$passwordText = self::prehash($passwordText);
-
-			$expectedHash = \substr(
+		try {
+			/*
+			 * Always extract exactly PREFIX_LENGTH bytes before comparing.
+			 *
+			 * hash_equals() prevents introducing a conventional early-exit
+			 * string comparison into the authentication path.
+			 *
+			 * The prefix itself is not secret, but using a timing-safe
+			 * primitive here keeps comparisons in verify() consistently
+			 * resistant to timing discrepancies.
+			 */
+			$prefix = \substr(
 				$expectedHash,
+				0,
 				self::PREFIX_LENGTH
 			);
-		}
 
-		/*
-		 * Do NOT recreate the hash and compare strings manually.
-		 *
-		 * password_verify() performs the password-hash verification using
-		 * PHP's timing-attack-resistant implementation.
-		 */
-		return \password_verify(
-			$passwordText,
-			$expectedHash
-		);
+			$usesPrehash =
+				\strlen($prefix) === self::PREFIX_LENGTH
+				&& \hash_equals(
+					self::PREFIX_BCRYPT_WITH_HMAC_SHA_512_PREHASH,
+					$prefix
+				);
+
+			if ($usesPrehash) {
+				$passwordText = self::prehash($passwordText);
+
+				$expectedHash = \substr(
+					$expectedHash,
+					self::PREFIX_LENGTH
+				);
+			}
+
+			/*
+			 * Do NOT calculate another hash and compare strings manually.
+			 *
+			 * password_verify() performs the password-hash verification
+			 * using PHP's timing-attack-safe implementation.
+			 */
+			return \password_verify(
+				$passwordText,
+				$expectedHash
+			);
+		}
+		catch (\Throwable $e) {
+			/*
+			 * Authentication failure is intentionally indistinguishable
+			 * from malformed/unusable hash data.
+			 *
+			 * No internal exception text escapes this boundary.
+			 */
+			return false;
+		}
 	}
 
 	/**
 	 * Checks whether a computationally expensive hash needs to be updated
-	 * to match a desired algorithm and set of options.
+	 * to match a desired algorithm and set of options
 	 *
 	 * @param string $existingHash
 	 * @return bool
 	 */
 	public static function needsRehash($existingHash) {
-		if (
-			\substr($existingHash, 0, self::PREFIX_LENGTH)
-			=== self::PREFIX_BCRYPT_WITH_HMAC_SHA_512_PREHASH
-		) {
-			$existingHash = \substr(
+		try {
+			$prefix = \substr(
 				$existingHash,
+				0,
 				self::PREFIX_LENGTH
 			);
-		}
 
-		return \password_needs_rehash(
-			$existingHash,
-			self::HASH_ALGORITHM_IDENTIFIER
-		);
+			if (
+				\strlen($prefix) === self::PREFIX_LENGTH
+				&& \hash_equals(
+					self::PREFIX_BCRYPT_WITH_HMAC_SHA_512_PREHASH,
+					$prefix
+				)
+			) {
+				$existingHash = \substr(
+					$existingHash,
+					self::PREFIX_LENGTH
+				);
+			}
+
+			return \password_needs_rehash(
+				$existingHash,
+				self::HASH_ALGORITHM_IDENTIFIER
+			);
+		}
+		catch (\Throwable $e) {
+			/*
+			 * An unreadable/invalid hash should be replaced rather than
+			 * exposing the cause of the failure.
+			 */
+			return true;
+		}
 	}
 
 	/**
-	 * Pre-hashes the complete password using HMAC-SHA-512 and encodes the
-	 * binary result as Base64 before it is passed to bcrypt.
+	 * Produces a fixed-format representation of the complete password.
+	 *
+	 * HMAC-SHA-512:
+	 *   input  = original password, including NUL bytes and all bytes > 72
+	 *   key    = binary representation of the fixed pepper
+	 *   output = 64 raw bytes
+	 *
+	 * Base64:
+	 *   converts those 64 bytes into an ASCII-only representation,
+	 *   preventing embedded NUL bytes from reaching bcrypt.
 	 *
 	 * @param string $passwordText
 	 * @return string
-	 *
-	 * @throws AuthError On an internal preprocessing failure. The exception
-	 *                   intentionally contains no implementation details,
-	 *                   keys, input values or infrastructure information.
+	 * @throws AuthError
 	 */
 	private static function prehash($passwordText) {
-		/*
-		 * Convert the hexadecimal pepper to its original binary form.
-		 *
-		 * Strict mode avoids silently accepting malformed hexadecimal
-		 * input. The constant itself must never be modified, truncated,
-		 * normalized or concatenated with the password.
-		 */
-		$pepperBinary = \hex2bin(
-			self::PEPPER_HMAC_SHA_512_PREHASH
-		);
+		try {
+			/*
+			 * Decode the hexadecimal pepper without modifying, truncating,
+			 * concatenating or otherwise normalizing its contents.
+			 */
+			$pepperBinary = \hex2bin(
+				self::PEPPER_HMAC_SHA_512_PREHASH
+			);
 
-		if ($pepperBinary === false) {
-			throw new AuthError('Password preprocessing failed');
+			/*
+			 * A SHA-512 pepper encoded as hexadecimal must decode to exactly
+			 * 64 bytes. Use strict checks instead of empty(), avoiding
+			 * type-coercion ambiguity.
+			 */
+			if (
+				$pepperBinary === false
+				|| \strlen($pepperBinary) !== 64
+			) {
+				throw new AuthError('Password processing failed');
+			}
+
+			/*
+			 * Process the ENTIRE password as binary-safe input.
+			 *
+			 * hash_hmac() receives the string length maintained by PHP,
+			 * therefore embedded "\0" bytes do not terminate the password,
+			 * and input beyond 72 bytes is incorporated into the HMAC.
+			 */
+			$hmacBinary = \hash_hmac(
+				'sha512',
+				$passwordText,
+				$pepperBinary,
+				true
+			);
+
+			/*
+			 * SHA-512 HMAC in raw mode must contain exactly 64 bytes.
+			 * Never use empty() for cryptographic binary values.
+			 */
+			if (
+				!\is_string($hmacBinary)
+				|| \strlen($hmacBinary) !== 64
+			) {
+				throw new AuthError('Password processing failed');
+			}
+
+			/*
+			 * Preserve Base64 exactly.
+			 *
+			 * 64 bytes of HMAC-SHA-512 become 88 ASCII Base64 bytes.
+			 * This eliminates embedded NUL bytes before bcrypt.
+			 */
+			return \base64_encode($hmacBinary);
 		}
-
-		/*
-		 * IMPORTANT:
-		 *
-		 * hash_hmac() receives the ENTIRE PHP string. PHP strings are
-		 * binary-safe, so:
-		 *
-		 *     "abc\0def"
-		 *
-		 * and passwords far beyond 72 bytes are processed in full here.
-		 *
-		 * The fourth argument `true` is essential: it requests the raw
-		 * 64-byte SHA-512 HMAC rather than its hexadecimal representation.
-		 */
-		$hmacBinary = \hash_hmac(
-			'sha512',
-			$passwordText,
-			$pepperBinary,
-			true
-		);
-
-		/*
-		 * SHA-512 HMAC normally produces exactly 64 bytes.
-		 *
-		 * Checking both type and length makes the integrity invariant
-		 * explicit and prevents an incomplete or unexpected pre-hash from
-		 * being silently accepted.
-		 */
-		if (
-			! \is_string($hmacBinary)
-			|| \strlen($hmacBinary) !== 64
-		) {
-			throw new AuthError('Password preprocessing failed');
+		catch (AuthError $e) {
+			// Already sanitized: no low-level diagnostic information.
+			throw $e;
 		}
-
-		/*
-		 * Base64 is deliberately preserved.
-		 *
-		 * 64 raw HMAC bytes become 88 printable Base64 bytes. Thus no NUL
-		 * bytes from the binary HMAC are passed directly to bcrypt.
-		 *
-		 * Although bcrypt consumes at most 72 bytes, those bytes now come
-		 * from a cryptographic digest of the COMPLETE original password;
-		 * bcrypt is therefore not truncating the original password.
-		 */
-		return \base64_encode($hmacBinary);
+		catch (\Throwable $e) {
+			/*
+			 * Do not expose PHP exception messages, algorithm names,
+			 * paths, configuration or other environmental information.
+			 */
+			throw new AuthError('Password processing failed');
+		}
 	}
 
 }
