@@ -4,36 +4,38 @@ namespace Delight\Auth;
 
 final class PasswordHash {
 
+    /** @var int|string Algoritmo principal de hashing */
     private const HASH_ALGO = \PASSWORD_DEFAULT;
+
+    /** @var string Pepper semipública usada no HMAC */
     private const PEPPER = 'bec95beffb3afd078df7cbfd4c4617ba214ac4641a157c1ca64106e7544c9fb4cef6e99b0a8f0b63e96328c09943ce96b9b8899ff54fa7ea57b622675442dbbf';
+
+    /** @var string Prefixo indicando uso de pre-hash */
     private const PREFIX = '$pa01';
+
+    /** @var int Tamanho do prefixo */
     private const PREFIX_LEN = 5;
 
     /**
-     * Gera um hash seguro para a senha.
+     * Gera o hash seguro da senha
      *
      * @param string $password
      * @return string
      * @throws AuthError
      */
     public static function from(string $password): string {
-        $usePrehash = self::shouldUsePrehash();
+        $useBcrypt = self::HASH_ALGO === \PASSWORD_BCRYPT || self::HASH_ALGO === null;
 
-        if ($usePrehash) {
+        if ($useBcrypt) {
             $password = self::prehash($password);
+            return self::PREFIX . \password_hash($password, self::HASH_ALGO);
         }
 
-        $hash = \password_hash($password, self::HASH_ALGO);
-
-        if ($hash === false) {
-            throw new AuthError('Falha ao gerar hash da senha');
-        }
-
-        return ($usePrehash ? self::PREFIX : '') . $hash;
+        return \password_hash($password, self::HASH_ALGO);
     }
 
     /**
-     * Verifica se a senha corresponde ao hash armazenado.
+     * Verifica se a senha corresponde ao hash
      *
      * @param string $password
      * @param string $expectedHash
@@ -50,7 +52,7 @@ final class PasswordHash {
     }
 
     /**
-     * Verifica se o hash precisa ser atualizado.
+     * Verifica se o hash precisa ser atualizado
      *
      * @param string $hash
      * @return bool
@@ -64,7 +66,7 @@ final class PasswordHash {
     }
 
     /**
-     * Aplica pré-hashing com HMAC-SHA512 + Base64.
+     * Aplica pre-hash com HMAC-SHA512 + Base64
      *
      * @param string $password
      * @return string
@@ -74,34 +76,27 @@ final class PasswordHash {
         $pepper = \hex2bin(self::PEPPER);
 
         if ($pepper === false) {
-            throw new AuthError('Pepper inválido para HMAC');
+            throw new AuthError('Pepper inválida ou corrompida');
         }
 
         $hmac = \hash_hmac('sha512', $password, $pepper, true);
 
-        if (empty($hmac)) {
-            throw new AuthError('Falha ao gerar HMAC para pré-hash');
+        if (!$hmac) {
+            throw new AuthError('Falha ao gerar HMAC para pre-hash');
         }
 
         return \base64_encode($hmac);
     }
 
     /**
-     * Determina se o pré-hash deve ser aplicado.
-     */
-    private static function shouldUsePrehash(): bool {
-        return self::HASH_ALGO === \PASSWORD_BCRYPT || self::HASH_ALGO === null;
-    }
-
-    /**
-     * Verifica se o hash possui o prefixo customizado.
+     * Verifica se o hash possui o prefixo customizado
      */
     private static function hasPrefix(string $hash): bool {
         return \strncmp($hash, self::PREFIX, self::PREFIX_LEN) === 0;
     }
 
     /**
-     * Remove o prefixo customizado do hash.
+     * Remove o prefixo customizado
      */
     private static function stripPrefix(string $hash): string {
         return \substr($hash, self::PREFIX_LEN);
